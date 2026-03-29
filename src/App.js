@@ -1,0 +1,750 @@
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import {
+  LineChart, Line, AreaChart, Area, BarChart, Bar,
+  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, PieChart, Pie, Cell
+} from 'recharts';
+import { supabase } from './supabaseClient';
+import { format, subMonths, subDays, parseISO, startOfDay } from 'date-fns';
+import './App.css';
+
+// ─── Helpers ────────────────────────────────────────────
+const fmt = (d) => format(parseISO(d), 'MMM d, yyyy');
+const fmtShort = (d) => format(parseISO(d), 'MMM d');
+const today = format(new Date(), 'yyyy-MM-dd');
+const ago = (months) => format(subMonths(new Date(), months), 'yyyy-MM-dd');
+const daysAgo = (n) => format(subDays(new Date(), n), 'yyyy-MM-dd');
+
+const TABS = ['Weight', 'Measurements', 'Workouts', 'Nutrition', 'Photos'];
+const MEAL_TYPES = ['Breakfast', 'Lunch', 'Dinner', 'Snack'];
+const WORKOUT_TYPES = ['Strength', 'Cardio', 'HIIT', 'Yoga', 'Stretching', 'Other'];
+const POSE_TYPES = ['Front', 'Side', 'Back'];
+const MACRO_COLORS = { protein: '#4f6ef7', carbs: '#f59e0b', fat: '#ef4444', fiber: '#22c55e' };
+const PIE_COLORS = ['#4f6ef7', '#f59e0b', '#ef4444', '#22c55e'];
+
+const MEASUREMENT_FIELDS = [
+  { key: 'chest_in', label: 'Chest' },
+  { key: 'waist_in', label: 'Waist' },
+  { key: 'hips_in', label: 'Hips' },
+  { key: 'bicep_left_in', label: 'L Bicep' },
+  { key: 'bicep_right_in', label: 'R Bicep' },
+  { key: 'thigh_left_in', label: 'L Thigh' },
+  { key: 'thigh_right_in', label: 'R Thigh' },
+  { key: 'neck_in', label: 'Neck' },
+];
+
+// ─── Main App ───────────────────────────────────────────
+export default function App() {
+  const [tab, setTab] = useState('Weight');
+  const [dateFrom, setDateFrom] = useState(ago(3));
+  const [dateTo, setDateTo] = useState(today);
+  const [preset, setPreset] = useState('3m');
+  const [modal, setModal] = useState(null);
+
+  // Data state
+  const [weights, setWeights] = useState([]);
+  const [measurements, setMeasurements] = useState([]);
+  const [workouts, setWorkouts] = useState([]);
+  const [foodLogs, setFoodLogs] = useState([]);
+  const [photos, setPhotos] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  // ─── Date presets ──────────────────────────────────────
+  const applyPreset = (p) => {
+    setPreset(p);
+    setDateTo(today);
+    const map = { '7d': daysAgo(7), '1m': ago(1), '3m': ago(3), '6m': ago(6), '1y': ago(12), 'all': '2020-01-01' };
+    setDateFrom(map[p] || ago(3));
+  };
+
+  // ─── Fetch data ────────────────────────────────────────
+  const fetchAll = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const range = { from: dateFrom, to: dateTo };
+      const [w, m, wo, f, p] = await Promise.all([
+        supabase.from('weight_logs').select('*').gte('logged_at', range.from).lte('logged_at', range.to).order('logged_at'),
+        supabase.from('measurements').select('*').gte('logged_at', range.from).lte('logged_at', range.to).order('logged_at'),
+        supabase.from('workouts').select('*').gte('logged_at', range.from).lte('logged_at', range.to).order('logged_at', { ascending: false }),
+        supabase.from('food_logs').select('*').gte('logged_at', range.from).lte('logged_at', range.to).order('logged_at', { ascending: false }),
+        supabase.from('progress_photos').select('*').gte('logged_at', range.from).lte('logged_at', range.to).order('logged_at', { ascending: false }),
+      ]);
+      if (w.error) throw w.error;
+      setWeights(w.data || []);
+      setMeasurements(m.data || []);
+      setWorkouts(wo.data || []);
+      setFoodLogs(f.data || []);
+      setPhotos(p.data || []);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [dateFrom, dateTo]);
+
+  useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  // ─── CRUD helpers ──────────────────────────────────────
+  const insert = async (table, data) => {
+    const { error } = await supabase.from(table).insert(data);
+    if (error) { setError(error.message); return false; }
+    fetchAll();
+    return true;
+  };
+
+  const remove = async (table, id) => {
+    if (!window.confirm('Delete this entry?')) return;
+    const { error } = await supabase.from(table).delete().eq('id', id);
+    if (error) setError(error.message);
+    else fetchAll();
+  };
+
+  // ─── Render ────────────────────────────────────────────
+  return (
+    <div className="app">
+      <header className="header">
+        <h1>🏋️ <span>Health</span> Dashboard</h1>
+      </header>
+
+      {/* Tabs */}
+      <nav className="tabs">
+        {TABS.map(t => (
+          <button key={t} className={`tab-btn ${tab === t ? 'active' : ''}`} onClick={() => setTab(t)}>
+            {t}
+          </button>
+        ))}
+      </nav>
+
+      {/* Date filter */}
+      <div className="date-filter">
+        <label>From</label>
+        <input type="date" value={dateFrom} onChange={e => { setDateFrom(e.target.value); setPreset(''); }} />
+        <label>To</label>
+        <input type="date" value={dateTo} onChange={e => { setDateTo(e.target.value); setPreset(''); }} />
+        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+          {['7d', '1m', '3m', '6m', '1y', 'all'].map(p => (
+            <button key={p} className={`preset-btn ${preset === p ? 'active' : ''}`} onClick={() => applyPreset(p)}>{p}</button>
+          ))}
+        </div>
+      </div>
+
+      {error && <div className="error-banner">⚠️ {error} <button className="btn btn-sm btn-secondary" style={{ marginLeft: 8 }} onClick={() => setError(null)}>Dismiss</button></div>}
+      {loading && <div className="loading">Loading data…</div>}
+
+      {/* Tab content */}
+      {!loading && tab === 'Weight' && <WeightSection data={weights} onAdd={() => setModal('weight')} onDelete={(id) => remove('weight_logs', id)} />}
+      {!loading && tab === 'Measurements' && <MeasurementsSection data={measurements} onAdd={() => setModal('measurement')} onDelete={(id) => remove('measurements', id)} />}
+      {!loading && tab === 'Workouts' && <WorkoutsSection data={workouts} onAdd={() => setModal('workout')} onDelete={(id) => remove('workouts', id)} />}
+      {!loading && tab === 'Nutrition' && <NutritionSection data={foodLogs} onAdd={() => setModal('food')} onDelete={(id) => remove('food_logs', id)} />}
+      {!loading && tab === 'Photos' && <PhotosSection data={photos} onAdd={() => setModal('photo')} onDelete={(id) => remove('progress_photos', id)} />}
+
+      {/* Modals */}
+      {modal === 'weight' && <WeightModal onClose={() => setModal(null)} onSave={(d) => insert('weight_logs', d).then(ok => ok && setModal(null))} />}
+      {modal === 'measurement' && <MeasurementModal onClose={() => setModal(null)} onSave={(d) => insert('measurements', d).then(ok => ok && setModal(null))} />}
+      {modal === 'workout' && <WorkoutModal onClose={() => setModal(null)} onSave={(d) => insert('workouts', d).then(ok => ok && setModal(null))} />}
+      {modal === 'food' && <FoodModal onClose={() => setModal(null)} onSave={(d) => insert('food_logs', d).then(ok => ok && setModal(null))} />}
+      {modal === 'photo' && <PhotoModal onClose={() => setModal(null)} onSave={(d) => insert('progress_photos', d).then(ok => ok && setModal(null))} />}
+    </div>
+  );
+}
+
+// ═════════════════════════════════════════════════════════
+// SECTION: Weight Tracking
+// ═════════════════════════════════════════════════════════
+function WeightSection({ data, onAdd, onDelete }) {
+  const chartData = data.map(w => ({ date: fmtShort(w.logged_at), weight: Number(w.weight_lbs), fullDate: w.logged_at }));
+  const latest = data.length ? Number(data[data.length - 1].weight_lbs) : null;
+  const first = data.length ? Number(data[0].weight_lbs) : null;
+  const change = latest !== null && first !== null ? (latest - first).toFixed(1) : null;
+  const min = data.length ? Math.min(...data.map(w => Number(w.weight_lbs))) : 0;
+  const max = data.length ? Math.max(...data.map(w => Number(w.weight_lbs))) : 0;
+  const avg = data.length ? (data.reduce((s, w) => s + Number(w.weight_lbs), 0) / data.length).toFixed(1) : '—';
+
+  return (
+    <>
+      <div className="card">
+        <div className="card-header">
+          <h2>Weight Trend</h2>
+          <button className="add-btn" onClick={onAdd}>+ Log Weight</button>
+        </div>
+        <div className="stat-grid">
+          <div className="stat-card"><div className="label">Current</div><div className="value">{latest ?? '—'}</div><div className="label">lbs</div></div>
+          <div className="stat-card"><div className="label">Change</div><div className="value" style={{ color: change > 0 ? '#ef4444' : change < 0 ? '#22c55e' : undefined }}>{change !== null ? `${change > 0 ? '+' : ''}${change}` : '—'}</div><div className="label">lbs</div></div>
+          <div className="stat-card"><div className="label">Average</div><div className="value">{avg}</div><div className="label">lbs</div></div>
+          <div className="stat-card"><div className="label">Range</div><div className="value">{data.length ? `${min}–${max}` : '—'}</div><div className="label">lbs</div></div>
+        </div>
+        {chartData.length > 1 ? (
+          <ResponsiveContainer width="100%" height={300}>
+            <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
+              <defs>
+                <linearGradient id="weightGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#4f6ef7" stopOpacity={0.2} />
+                  <stop offset="95%" stopColor="#4f6ef7" stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e6ec" />
+              <XAxis dataKey="date" tick={{ fontSize: 12 }} />
+              <YAxis domain={['dataMin - 2', 'dataMax + 2']} tick={{ fontSize: 12 }} />
+              <Tooltip contentStyle={{ borderRadius: 8, border: '1px solid #e2e6ec' }} />
+              <Area type="monotone" dataKey="weight" stroke="#4f6ef7" strokeWidth={2.5} fill="url(#weightGrad)" dot={{ r: 3, fill: '#4f6ef7' }} activeDot={{ r: 5 }} />
+            </AreaChart>
+          </ResponsiveContainer>
+        ) : chartData.length === 1 ? (
+          <div className="empty-state"><p>Add another weight entry to see the trend chart.</p></div>
+        ) : (
+          <div className="empty-state"><div className="icon">⚖️</div><p>No weight data yet. Start tracking!</p></div>
+        )}
+      </div>
+      {data.length > 0 && (
+        <div className="card">
+          <h2 style={{ marginBottom: 12 }}>Log History</h2>
+          <div className="table-wrap">
+            <table className="data-table">
+              <thead><tr><th>Date</th><th>Weight</th><th>Notes</th><th></th></tr></thead>
+              <tbody>
+                {[...data].reverse().map(w => (
+                  <tr key={w.id}>
+                    <td>{fmt(w.logged_at)}</td>
+                    <td><strong>{w.weight_lbs} lbs</strong></td>
+                    <td style={{ color: '#5f6775' }}>{w.notes || '—'}</td>
+                    <td><button className="btn btn-sm btn-secondary" onClick={() => onDelete(w.id)}>✕</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ═════════════════════════════════════════════════════════
+// SECTION: Body Measurements
+// ═════════════════════════════════════════════════════════
+function MeasurementsSection({ data, onAdd, onDelete }) {
+  const latest = data.length ? data[data.length - 1] : null;
+
+  // Find comparison records closest to 3m, 6m, 12m ago
+  const findClosest = (targetDate) => {
+    if (!data.length) return null;
+    let closest = null;
+    let minDiff = Infinity;
+    for (const row of data) {
+      const diff = Math.abs(new Date(row.logged_at) - new Date(targetDate));
+      if (diff < minDiff) { minDiff = diff; closest = row; }
+    }
+    // Only return if within 30 days of target
+    return minDiff < 30 * 24 * 60 * 60 * 1000 ? closest : null;
+  };
+
+  const comparisons = [
+    { label: '3 months ago', record: findClosest(ago(3)) },
+    { label: '6 months ago', record: findClosest(ago(6)) },
+    { label: '12 months ago', record: findClosest(ago(12)) },
+  ];
+
+  return (
+    <>
+      <div className="card">
+        <div className="card-header">
+          <h2>Body Measurements</h2>
+          <button className="add-btn" onClick={onAdd}>+ Log Measurements</button>
+        </div>
+        {latest ? (
+          <>
+            <p style={{ fontSize: 13, color: '#5f6775', marginBottom: 16 }}>Latest: {fmt(latest.logged_at)}</p>
+            <div className="comparison-grid">
+              {MEASUREMENT_FIELDS.map(f => {
+                const currentVal = latest[f.key];
+                if (!currentVal) return null;
+                return (
+                  <div className="comparison-card" key={f.key}>
+                    <div className="part">{f.label}</div>
+                    <div style={{ fontSize: 28, fontWeight: 700 }}>{currentVal}"</div>
+                    {comparisons.map((c, i) => {
+                      if (!c.record || !c.record[f.key]) return null;
+                      const diff = (Number(currentVal) - Number(c.record[f.key])).toFixed(1);
+                      return (
+                        <div className="comparison-row" key={i}>
+                          <span className="label">vs {c.label}</span>
+                          <span style={{ fontWeight: 600, color: diff > 0 ? '#22c55e' : diff < 0 ? '#ef4444' : '#5f6775' }}>
+                            {diff > 0 ? '+' : ''}{diff}"
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        ) : (
+          <div className="empty-state"><div className="icon">📏</div><p>No measurement data yet. Start tracking!</p></div>
+        )}
+      </div>
+      {/* Trend chart for waist/chest if enough data */}
+      {data.length > 1 && (
+        <div className="card">
+          <h2 style={{ marginBottom: 12 }}>Measurement Trends</h2>
+          <ResponsiveContainer width="100%" height={300}>
+            <LineChart data={data.map(d => ({ date: fmtShort(d.logged_at), ...MEASUREMENT_FIELDS.reduce((acc, f) => ({ ...acc, [f.label]: Number(d[f.key]) || null }), {}) }))} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e6ec" />
+              <XAxis dataKey="date" tick={{ fontSize: 12 }} />
+              <YAxis tick={{ fontSize: 12 }} />
+              <Tooltip contentStyle={{ borderRadius: 8, border: '1px solid #e2e6ec' }} />
+              <Legend />
+              {MEASUREMENT_FIELDS.map((f, i) => (
+                <Line key={f.key} type="monotone" dataKey={f.label} stroke={['#4f6ef7', '#f59e0b', '#ef4444', '#22c55e', '#8b5cf6', '#06b6d4', '#ec4899', '#84cc16'][i]} strokeWidth={2} dot={{ r: 2 }} connectNulls />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+      {data.length > 0 && (
+        <div className="card">
+          <h2 style={{ marginBottom: 12 }}>Log History</h2>
+          <div className="table-wrap">
+            <table className="data-table">
+              <thead><tr><th>Date</th>{MEASUREMENT_FIELDS.map(f => <th key={f.key}>{f.label}</th>)}<th></th></tr></thead>
+              <tbody>
+                {[...data].reverse().map(row => (
+                  <tr key={row.id}>
+                    <td>{fmt(row.logged_at)}</td>
+                    {MEASUREMENT_FIELDS.map(f => <td key={f.key}>{row[f.key] ? `${row[f.key]}"` : '—'}</td>)}
+                    <td><button className="btn btn-sm btn-secondary" onClick={() => onDelete(row.id)}>✕</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ═════════════════════════════════════════════════════════
+// SECTION: Workouts
+// ═════════════════════════════════════════════════════════
+function WorkoutsSection({ data, onAdd, onDelete }) {
+  const totalWorkouts = data.length;
+  const totalCalories = data.reduce((s, w) => s + (w.calories_burned || 0), 0);
+  const totalDuration = data.reduce((s, w) => s + (w.duration_min || 0), 0);
+  const typeBreakdown = data.reduce((acc, w) => { acc[w.workout_type] = (acc[w.workout_type] || 0) + 1; return acc; }, {});
+  const pieData = Object.entries(typeBreakdown).map(([name, value]) => ({ name, value }));
+
+  // Volume chart: total weight lifted per day (for strength)
+  const volumeByDay = {};
+  data.forEach(w => {
+    if (w.sets && w.reps && w.weight_lbs) {
+      const d = w.logged_at;
+      volumeByDay[d] = (volumeByDay[d] || 0) + (w.sets * w.reps * Number(w.weight_lbs));
+    }
+  });
+  const volumeChart = Object.entries(volumeByDay).sort().map(([date, vol]) => ({ date: fmtShort(date), volume: Math.round(vol) }));
+
+  return (
+    <>
+      <div className="card">
+        <div className="card-header">
+          <h2>Workout Performance</h2>
+          <button className="add-btn" onClick={onAdd}>+ Log Workout</button>
+        </div>
+        <div className="stat-grid">
+          <div className="stat-card"><div className="label">Total Sessions</div><div className="value">{totalWorkouts}</div></div>
+          <div className="stat-card"><div className="label">Total Duration</div><div className="value">{totalDuration}</div><div className="label">min</div></div>
+          <div className="stat-card"><div className="label">Calories Burned</div><div className="value">{totalCalories.toLocaleString()}</div></div>
+          <div className="stat-card"><div className="label">Workout Types</div><div className="value">{Object.keys(typeBreakdown).length}</div></div>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: pieData.length && volumeChart.length ? '200px 1fr' : '1fr', gap: 16, alignItems: 'center' }}>
+          {pieData.length > 0 && (
+            <ResponsiveContainer width="100%" height={200}>
+              <PieChart>
+                <Pie data={pieData} cx="50%" cy="50%" outerRadius={80} dataKey="value" label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`} labelLine={false} style={{ fontSize: 11 }}>
+                  {pieData.map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
+                </Pie>
+                <Tooltip />
+              </PieChart>
+            </ResponsiveContainer>
+          )}
+          {volumeChart.length > 1 && (
+            <ResponsiveContainer width="100%" height={200}>
+              <BarChart data={volumeChart} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e6ec" />
+                <XAxis dataKey="date" tick={{ fontSize: 12 }} />
+                <YAxis tick={{ fontSize: 12 }} />
+                <Tooltip contentStyle={{ borderRadius: 8, border: '1px solid #e2e6ec' }} formatter={(v) => [`${v.toLocaleString()} lbs`, 'Volume']} />
+                <Bar dataKey="volume" fill="#4f6ef7" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+        {!data.length && <div className="empty-state"><div className="icon">🏋️</div><p>No workouts logged yet. Get after it!</p></div>}
+      </div>
+      {data.length > 0 && (
+        <div className="card">
+          <h2 style={{ marginBottom: 12 }}>Workout Log</h2>
+          <div className="table-wrap">
+            <table className="data-table">
+              <thead><tr><th>Date</th><th>Type</th><th>Exercise</th><th>Sets×Reps</th><th>Weight</th><th>Duration</th><th>Calories</th><th></th></tr></thead>
+              <tbody>
+                {data.map(w => (
+                  <tr key={w.id}>
+                    <td>{fmt(w.logged_at)}</td>
+                    <td><span style={{ padding: '2px 8px', borderRadius: 12, background: '#eef1fe', color: '#4f6ef7', fontSize: 12, fontWeight: 600 }}>{w.workout_type}</span></td>
+                    <td><strong>{w.exercise_name}</strong></td>
+                    <td>{w.sets && w.reps ? `${w.sets}×${w.reps}` : '—'}</td>
+                    <td>{w.weight_lbs ? `${w.weight_lbs} lbs` : '—'}</td>
+                    <td>{w.duration_min ? `${w.duration_min} min` : '—'}</td>
+                    <td>{w.calories_burned || '—'}</td>
+                    <td><button className="btn btn-sm btn-secondary" onClick={() => onDelete(w.id)}>✕</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ═════════════════════════════════════════════════════════
+// SECTION: Nutrition / Food Logs
+// ═════════════════════════════════════════════════════════
+function NutritionSection({ data, onAdd, onDelete }) {
+  // Daily aggregation
+  const dailyMap = {};
+  data.forEach(f => {
+    if (!dailyMap[f.logged_at]) dailyMap[f.logged_at] = { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0, meals: [] };
+    const d = dailyMap[f.logged_at];
+    d.calories += f.calories || 0;
+    d.protein += Number(f.protein_g) || 0;
+    d.carbs += Number(f.carbs_g) || 0;
+    d.fat += Number(f.fat_g) || 0;
+    d.fiber += Number(f.fiber_g) || 0;
+    d.meals.push(f);
+  });
+  const dailyData = Object.entries(dailyMap).sort().map(([date, d]) => ({ date: fmtShort(date), fullDate: date, ...d }));
+
+  const totalCal = dailyData.reduce((s, d) => s + d.calories, 0);
+  const avgCal = dailyData.length ? Math.round(totalCal / dailyData.length) : 0;
+  const avgProtein = dailyData.length ? Math.round(dailyData.reduce((s, d) => s + d.protein, 0) / dailyData.length) : 0;
+  const avgCarbs = dailyData.length ? Math.round(dailyData.reduce((s, d) => s + d.carbs, 0) / dailyData.length) : 0;
+  const avgFat = dailyData.length ? Math.round(dailyData.reduce((s, d) => s + d.fat, 0) / dailyData.length) : 0;
+
+  const macroTotal = avgProtein * 4 + avgCarbs * 4 + avgFat * 9;
+
+  return (
+    <>
+      <div className="card">
+        <div className="card-header">
+          <h2>Nutrition Overview</h2>
+          <button className="add-btn" onClick={onAdd}>+ Log Food</button>
+        </div>
+        <div className="stat-grid">
+          <div className="stat-card"><div className="label">Avg Daily Cal</div><div className="value">{avgCal.toLocaleString()}</div></div>
+          <div className="stat-card"><div className="label">Avg Protein</div><div className="value">{avgProtein}g</div></div>
+          <div className="stat-card"><div className="label">Avg Carbs</div><div className="value">{avgCarbs}g</div></div>
+          <div className="stat-card"><div className="label">Avg Fat</div><div className="value">{avgFat}g</div></div>
+        </div>
+        {/* Macro split pie */}
+        {macroTotal > 0 && (
+          <div style={{ display: 'grid', gridTemplateColumns: '180px 1fr', gap: 16, alignItems: 'center', marginBottom: 16 }}>
+            <ResponsiveContainer width="100%" height={180}>
+              <PieChart>
+                <Pie data={[
+                  { name: 'Protein', value: avgProtein * 4 },
+                  { name: 'Carbs', value: avgCarbs * 4 },
+                  { name: 'Fat', value: avgFat * 9 },
+                ]} cx="50%" cy="50%" innerRadius={40} outerRadius={70} dataKey="value" label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`} labelLine={false} style={{ fontSize: 11 }}>
+                  {PIE_COLORS.slice(0, 3).map((c, i) => <Cell key={i} fill={c} />)}
+                </Pie>
+                <Tooltip formatter={(v) => [`${v} cal`, 'Calories']} />
+              </PieChart>
+            </ResponsiveContainer>
+            <div className="macro-bar-wrap">
+              {[{ label: 'Protein', val: avgProtein, max: 250, color: MACRO_COLORS.protein },
+                { label: 'Carbs', val: avgCarbs, max: 400, color: MACRO_COLORS.carbs },
+                { label: 'Fat', val: avgFat, max: 150, color: MACRO_COLORS.fat },
+                { label: 'Fiber', val: Math.round(dailyData.length ? dailyData.reduce((s, d) => s + d.fiber, 0) / dailyData.length : 0), max: 50, color: MACRO_COLORS.fiber },
+              ].map(m => (
+                <div className="macro-bar-row" key={m.label}>
+                  <div className="macro-bar-label">{m.label}</div>
+                  <div className="macro-bar-track">
+                    <div className="macro-bar-fill" style={{ width: `${Math.min(100, (m.val / m.max) * 100)}%`, background: m.color }} />
+                  </div>
+                  <div className="macro-bar-value">{m.val}g</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {/* Calorie trend */}
+        {dailyData.length > 1 && (
+          <ResponsiveContainer width="100%" height={250}>
+            <BarChart data={dailyData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e6ec" />
+              <XAxis dataKey="date" tick={{ fontSize: 12 }} />
+              <YAxis tick={{ fontSize: 12 }} />
+              <Tooltip contentStyle={{ borderRadius: 8, border: '1px solid #e2e6ec' }} />
+              <Bar dataKey="calories" fill="#4f6ef7" radius={[4, 4, 0, 0]} name="Calories" />
+            </BarChart>
+          </ResponsiveContainer>
+        )}
+        {!data.length && <div className="empty-state"><div className="icon">🍎</div><p>No food logs yet. Start tracking your meals!</p></div>}
+      </div>
+      {data.length > 0 && (
+        <div className="card">
+          <h2 style={{ marginBottom: 12 }}>Food Log</h2>
+          <div className="table-wrap">
+            <table className="data-table">
+              <thead><tr><th>Date</th><th>Meal</th><th>Food</th><th>Cal</th><th>P</th><th>C</th><th>F</th><th></th></tr></thead>
+              <tbody>
+                {data.map(f => (
+                  <tr key={f.id}>
+                    <td>{fmt(f.logged_at)}</td>
+                    <td><span style={{ padding: '2px 8px', borderRadius: 12, background: '#fef3c7', color: '#92400e', fontSize: 12, fontWeight: 600 }}>{f.meal_type}</span></td>
+                    <td><strong>{f.food_name}</strong></td>
+                    <td>{f.calories || '—'}</td>
+                    <td>{f.protein_g ? `${f.protein_g}g` : '—'}</td>
+                    <td>{f.carbs_g ? `${f.carbs_g}g` : '—'}</td>
+                    <td>{f.fat_g ? `${f.fat_g}g` : '—'}</td>
+                    <td><button className="btn btn-sm btn-secondary" onClick={() => onDelete(f.id)}>✕</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ═════════════════════════════════════════════════════════
+// SECTION: Progress Photos
+// ═════════════════════════════════════════════════════════
+function PhotosSection({ data, onAdd, onDelete }) {
+  const [selected, setSelected] = useState(null);
+
+  return (
+    <>
+      <div className="card">
+        <div className="card-header">
+          <h2>Progress Photos</h2>
+          <button className="add-btn" onClick={onAdd}>+ Upload Photo</button>
+        </div>
+        {data.length ? (
+          <div className="photo-grid">
+            {data.map(p => (
+              <div className="photo-card" key={p.id} onClick={() => setSelected(p)}>
+                <img src={p.photo_url} alt={p.caption || 'Progress'} loading="lazy" />
+                <div className="photo-info">
+                  <div className="date">{fmt(p.logged_at)}</div>
+                  {p.pose_type && <div className="pose">{p.pose_type}</div>}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="empty-state"><div className="icon">📸</div><p>No progress photos yet. Upload your first!</p></div>
+        )}
+      </div>
+      {/* Lightbox */}
+      {selected && (
+        <div className="modal-overlay" onClick={() => setSelected(null)}>
+          <div style={{ maxWidth: 600, width: '100%', textAlign: 'center' }} onClick={e => e.stopPropagation()}>
+            <img src={selected.photo_url} alt={selected.caption || 'Progress'} style={{ width: '100%', borderRadius: 12, maxHeight: '80vh', objectFit: 'contain' }} />
+            <div style={{ background: '#fff', borderRadius: 12, padding: 16, marginTop: 12 }}>
+              <p style={{ fontWeight: 600 }}>{fmt(selected.logged_at)} {selected.pose_type && `· ${selected.pose_type}`}</p>
+              {selected.caption && <p style={{ color: '#5f6775', marginTop: 4 }}>{selected.caption}</p>}
+              <div className="btn-group" style={{ justifyContent: 'center' }}>
+                <button className="btn btn-sm btn-danger" onClick={() => { onDelete(selected.id); setSelected(null); }}>Delete</button>
+                <button className="btn btn-sm btn-secondary" onClick={() => setSelected(null)}>Close</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ═════════════════════════════════════════════════════════
+// MODALS
+// ═════════════════════════════════════════════════════════
+function WeightModal({ onClose, onSave }) {
+  const [form, setForm] = useState({ logged_at: today, weight_lbs: '', notes: '' });
+  const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <h3>Log Weight</h3>
+        <div className="form-row">
+          <div className="form-group"><label>Date</label><input type="date" value={form.logged_at} onChange={e => set('logged_at', e.target.value)} /></div>
+          <div className="form-group"><label>Weight (lbs)</label><input type="number" step="0.1" placeholder="175.0" value={form.weight_lbs} onChange={e => set('weight_lbs', e.target.value)} /></div>
+        </div>
+        <div className="form-group"><label>Notes</label><textarea placeholder="How are you feeling?" value={form.notes} onChange={e => set('notes', e.target.value)} /></div>
+        <div className="btn-group">
+          <button className="btn btn-primary" disabled={!form.weight_lbs} onClick={() => onSave({ ...form, weight_lbs: Number(form.weight_lbs) })}>Save</button>
+          <button className="btn btn-secondary" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MeasurementModal({ onClose, onSave }) {
+  const [form, setForm] = useState({ logged_at: today, chest_in: '', waist_in: '', hips_in: '', bicep_left_in: '', bicep_right_in: '', thigh_left_in: '', thigh_right_in: '', neck_in: '', notes: '' });
+  const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
+  const toNum = (v) => v === '' ? null : Number(v);
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <h3>Log Measurements</h3>
+        <div className="form-group"><label>Date</label><input type="date" value={form.logged_at} onChange={e => set('logged_at', e.target.value)} /></div>
+        <div className="form-row">
+          {MEASUREMENT_FIELDS.map(f => (
+            <div className="form-group" key={f.key}><label>{f.label} (in)</label><input type="number" step="0.1" placeholder="0.0" value={form[f.key]} onChange={e => set(f.key, e.target.value)} /></div>
+          ))}
+        </div>
+        <div className="form-group"><label>Notes</label><textarea value={form.notes} onChange={e => set('notes', e.target.value)} /></div>
+        <div className="btn-group">
+          <button className="btn btn-primary" onClick={() => {
+            const d = { logged_at: form.logged_at, notes: form.notes };
+            MEASUREMENT_FIELDS.forEach(f => { d[f.key] = toNum(form[f.key]); });
+            onSave(d);
+          }}>Save</button>
+          <button className="btn btn-secondary" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WorkoutModal({ onClose, onSave }) {
+  const [form, setForm] = useState({ logged_at: today, workout_type: 'Strength', exercise_name: '', sets: '', reps: '', weight_lbs: '', duration_min: '', distance_mi: '', calories_burned: '', notes: '' });
+  const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
+  const toNum = (v) => v === '' ? null : Number(v);
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <h3>Log Workout</h3>
+        <div className="form-row">
+          <div className="form-group"><label>Date</label><input type="date" value={form.logged_at} onChange={e => set('logged_at', e.target.value)} /></div>
+          <div className="form-group"><label>Type</label><select value={form.workout_type} onChange={e => set('workout_type', e.target.value)}>{WORKOUT_TYPES.map(t => <option key={t}>{t}</option>)}</select></div>
+        </div>
+        <div className="form-group"><label>Exercise Name</label><input type="text" placeholder="Bench Press, Running, etc." value={form.exercise_name} onChange={e => set('exercise_name', e.target.value)} /></div>
+        <div className="form-row">
+          <div className="form-group"><label>Sets</label><input type="number" value={form.sets} onChange={e => set('sets', e.target.value)} /></div>
+          <div className="form-group"><label>Reps</label><input type="number" value={form.reps} onChange={e => set('reps', e.target.value)} /></div>
+        </div>
+        <div className="form-row">
+          <div className="form-group"><label>Weight (lbs)</label><input type="number" step="0.1" value={form.weight_lbs} onChange={e => set('weight_lbs', e.target.value)} /></div>
+          <div className="form-group"><label>Duration (min)</label><input type="number" value={form.duration_min} onChange={e => set('duration_min', e.target.value)} /></div>
+        </div>
+        <div className="form-row">
+          <div className="form-group"><label>Distance (mi)</label><input type="number" step="0.01" value={form.distance_mi} onChange={e => set('distance_mi', e.target.value)} /></div>
+          <div className="form-group"><label>Calories Burned</label><input type="number" value={form.calories_burned} onChange={e => set('calories_burned', e.target.value)} /></div>
+        </div>
+        <div className="form-group"><label>Notes</label><textarea value={form.notes} onChange={e => set('notes', e.target.value)} /></div>
+        <div className="btn-group">
+          <button className="btn btn-primary" disabled={!form.exercise_name} onClick={() => onSave({
+            ...form, sets: toNum(form.sets), reps: toNum(form.reps), weight_lbs: toNum(form.weight_lbs),
+            duration_min: toNum(form.duration_min), distance_mi: toNum(form.distance_mi), calories_burned: toNum(form.calories_burned)
+          })}>Save</button>
+          <button className="btn btn-secondary" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FoodModal({ onClose, onSave }) {
+  const [form, setForm] = useState({ logged_at: today, meal_type: 'Breakfast', food_name: '', calories: '', protein_g: '', carbs_g: '', fat_g: '', fiber_g: '', notes: '' });
+  const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
+  const toNum = (v) => v === '' ? null : Number(v);
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <h3>Log Food</h3>
+        <div className="form-row">
+          <div className="form-group"><label>Date</label><input type="date" value={form.logged_at} onChange={e => set('logged_at', e.target.value)} /></div>
+          <div className="form-group"><label>Meal</label><select value={form.meal_type} onChange={e => set('meal_type', e.target.value)}>{MEAL_TYPES.map(t => <option key={t}>{t}</option>)}</select></div>
+        </div>
+        <div className="form-group"><label>Food Name</label><input type="text" placeholder="Grilled chicken breast" value={form.food_name} onChange={e => set('food_name', e.target.value)} /></div>
+        <div className="form-row">
+          <div className="form-group"><label>Calories</label><input type="number" placeholder="350" value={form.calories} onChange={e => set('calories', e.target.value)} /></div>
+          <div className="form-group"><label>Protein (g)</label><input type="number" step="0.1" value={form.protein_g} onChange={e => set('protein_g', e.target.value)} /></div>
+        </div>
+        <div className="form-row">
+          <div className="form-group"><label>Carbs (g)</label><input type="number" step="0.1" value={form.carbs_g} onChange={e => set('carbs_g', e.target.value)} /></div>
+          <div className="form-group"><label>Fat (g)</label><input type="number" step="0.1" value={form.fat_g} onChange={e => set('fat_g', e.target.value)} /></div>
+        </div>
+        <div className="form-row">
+          <div className="form-group"><label>Fiber (g)</label><input type="number" step="0.1" value={form.fiber_g} onChange={e => set('fiber_g', e.target.value)} /></div>
+          <div className="form-group"></div>
+        </div>
+        <div className="form-group"><label>Notes</label><textarea value={form.notes} onChange={e => set('notes', e.target.value)} /></div>
+        <div className="btn-group">
+          <button className="btn btn-primary" disabled={!form.food_name} onClick={() => onSave({
+            ...form, calories: toNum(form.calories), protein_g: toNum(form.protein_g), carbs_g: toNum(form.carbs_g),
+            fat_g: toNum(form.fat_g), fiber_g: toNum(form.fiber_g)
+          })}>Save</button>
+          <button className="btn btn-secondary" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PhotoModal({ onClose, onSave }) {
+  const [form, setForm] = useState({ logged_at: today, photo_url: '', pose_type: 'Front', caption: '' });
+  const [uploading, setUploading] = useState(false);
+  const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
+
+  const handleFileUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      const ext = file.name.split('.').pop();
+      const fileName = `${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+      const { data, error } = await supabase.storage.from('progress-photos').upload(fileName, file);
+      if (error) throw error;
+      const { data: urlData } = supabase.storage.from('progress-photos').getPublicUrl(fileName);
+      set('photo_url', urlData.publicUrl);
+    } catch (err) {
+      alert('Upload failed: ' + err.message);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <h3>Upload Progress Photo</h3>
+        <div className="form-row">
+          <div className="form-group"><label>Date</label><input type="date" value={form.logged_at} onChange={e => set('logged_at', e.target.value)} /></div>
+          <div className="form-group"><label>Pose</label><select value={form.pose_type} onChange={e => set('pose_type', e.target.value)}>{POSE_TYPES.map(t => <option key={t}>{t}</option>)}</select></div>
+        </div>
+        <div className="form-group">
+          <label>Photo</label>
+          <input type="file" accept="image/*" onChange={handleFileUpload} />
+          {uploading && <p style={{ fontSize: 12, color: '#5f6775', marginTop: 4 }}>Uploading…</p>}
+          {form.photo_url && <img src={form.photo_url} alt="preview" style={{ marginTop: 8, width: '100%', maxHeight: 200, objectFit: 'contain', borderRadius: 8 }} />}
+        </div>
+        <div className="form-group"><label>Or paste image URL</label><input type="url" placeholder="https://..." value={form.photo_url} onChange={e => set('photo_url', e.target.value)} /></div>
+        <div className="form-group"><label>Caption</label><textarea placeholder="Week 4 check-in" value={form.caption} onChange={e => set('caption', e.target.value)} /></div>
+        <div className="btn-group">
+          <button className="btn btn-primary" disabled={!form.photo_url || uploading} onClick={() => onSave(form)}>Save</button>
+          <button className="btn btn-secondary" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}

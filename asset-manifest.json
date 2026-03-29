@@ -1,0 +1,13 @@
+{
+  "files": {
+    "main.css": "/emmanowo04/health-dashboard.git/static/css/main.54ca2bf0.css",
+    "main.js": "/emmanowo04/health-dashboard.git/static/js/main.83a66ccd.js",
+    "index.html": "/emmanowo04/health-dashboard.git/index.html",
+    "main.54ca2bf0.css.map": "/emmanowo04/health-dashboard.git/static/css/main.54ca2bf0.css.map",
+    "main.83a66ccd.js.map": "/emmanowo04/health-dashboard.git/static/js/main.83a66ccd.js.map"
+  },
+  "entrypoints": [
+    "static/css/main.54ca2bf0.css",
+    "static/js/main.83a66ccd.js"
+  ]
+}

@@ -2,7 +2,7 @@
   "name": "health-dashboard",
   "version": "1.0.0",
   "private": true,
-  "homepage": "https://github.com/emmanowo04/health-dashboard.git",
+  "homepage": "https://emmanowo04.github.io/health-dashboard",
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
     "react": "^18.3.1",

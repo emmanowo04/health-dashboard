@@ -1,13 +1,13 @@
 {
   "files": {
     "main.css": "/health-dashboard/static/css/main.54ca2bf0.css",
-    "main.js": "/health-dashboard/static/js/main.7561a375.js",
+    "main.js": "/health-dashboard/static/js/main.b1ae5951.js",
     "index.html": "/health-dashboard/index.html",
     "main.54ca2bf0.css.map": "/health-dashboard/static/css/main.54ca2bf0.css.map",
-    "main.7561a375.js.map": "/health-dashboard/static/js/main.7561a375.js.map"
+    "main.b1ae5951.js.map": "/health-dashboard/static/js/main.b1ae5951.js.map"
   },
   "entrypoints": [
     "static/css/main.54ca2bf0.css",
-    "static/js/main.7561a375.js"
+    "static/js/main.b1ae5951.js"
   ]
 }

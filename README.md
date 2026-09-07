@@ -3,6 +3,7 @@
 Personal health tracking dashboard built with React, Recharts, and Supabase.
 
 ## Features
+- **Weekly Planner** — Plan your week in 30-min blocks with click-and-drag painting, frequency-ranked activity chips, and a "copy last week" shortcut
 - **Weight Tracking** — Log weight with trend graphs and stats
 - **Body Measurements** — Track 8 body measurements with 3/6/12 month comparisons
 - **Workout Performance** — Log exercises with volume charts and type breakdowns
@@ -13,7 +14,7 @@ Personal health tracking dashboard built with React, Recharts, and Supabase.
 ## Setup
 
 ### 1. Create Supabase tables
-Run the SQL in `supabase-migrations.sql` in your Supabase SQL Editor.
+Run the SQL in `supabase-migrations.sql` in your Supabase SQL Editor. If you're updating an existing database, just run the new `planner_blocks` section (section 6) plus its RLS policy — the rest already exists.
 
 ### 2. Install & run
 ```bash

@@ -185,14 +185,22 @@ export default function App() {
 // ═════════════════════════════════════════════════════════
 function PlannerSection() {
   const [weekStart, setWeekStart] = useState(mondayOf(today));
-  const [blocks, setBlocks] = useState([]); // [{block_date, slot_index, activity}]
+  const [blocks, setBlocks] = useState([]); // [{block_date, slot_index, activity, task_id}]
   const [allActivity, setAllActivity] = useState([]); // all-time activity strings, for frequency ranking
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [brush, setBrush] = useState(null); // activity name, 'ERASE', or null
+  // brush: null | {kind:'activity', name} | {kind:'task', id, title} | {kind:'erase'}
+  const [brush, setBrush] = useState(null);
   const [newActivity, setNewActivity] = useState('');
   const [showEarly, setShowEarly] = useState(false);
   const draggingRef = useRef(false);
+
+  // ─── Task list state ───────────────────────────────────
+  const [categories, setCategories] = useState([]);
+  const [tasksByCategory, setTasksByCategory] = useState({});
+  const [newCategoryTitle, setNewCategoryTitle] = useState('');
+  const [newTaskTitle, setNewTaskTitle] = useState({});
+  const [showCompleted, setShowCompleted] = useState(false);
 
   const weekDates = useMemo(() => {
     const start = parseISO(weekStart);
@@ -214,8 +222,25 @@ function PlannerSection() {
     if (data) setAllActivity(data.map(d => d.activity));
   }, []);
 
+  const fetchTasks = useCallback(async () => {
+    const [{ data: cats, error: catErr }, { data: allTasks, error: taskErr }] = await Promise.all([
+      supabase.from('task_categories').select('*').order('position').order('created_at'),
+      supabase.from('tasks').select('*').order('position').order('created_at'),
+    ]);
+    if (catErr) setError(catErr.message);
+    if (taskErr) setError(taskErr.message);
+    setCategories(cats || []);
+    const grouped = {};
+    (allTasks || []).forEach(t => {
+      if (!grouped[t.category_id]) grouped[t.category_id] = [];
+      grouped[t.category_id].push(t);
+    });
+    setTasksByCategory(grouped);
+  }, []);
+
   useEffect(() => { fetchWeek(); }, [fetchWeek]);
   useEffect(() => { fetchFrequency(); }, [fetchFrequency]);
+  useEffect(() => { fetchTasks(); }, [fetchTasks]);
 
   useEffect(() => {
     const stop = () => { draggingRef.current = false; };
@@ -226,9 +251,31 @@ function PlannerSection() {
 
   const blockMap = useMemo(() => {
     const m = {};
-    blocks.forEach(b => { m[`${b.block_date}_${b.slot_index}`] = b.activity; });
+    blocks.forEach(b => { m[`${b.block_date}_${b.slot_index}`] = b; });
     return m;
   }, [blocks]);
+
+  // Minutes scheduled this week per task, for the little time badge in the panel
+  const taskMinutesThisWeek = useMemo(() => {
+    const m = {};
+    blocks.forEach(b => { if (b.task_id) m[b.task_id] = (m[b.task_id] || 0) + 30; });
+    return m;
+  }, [blocks]);
+
+  const taskCompleteMap = useMemo(() => {
+    const m = {};
+    Object.values(tasksByCategory).flat().forEach(t => { m[t.id] = t.is_complete; });
+    return m;
+  }, [tasksByCategory]);
+
+  const formatMinutes = (mins) => {
+    if (!mins) return null;
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    if (h && m) return `${h}h${m}m`;
+    if (h) return `${h}h`;
+    return `${m}m`;
+  };
 
   const topActivities = useMemo(() => {
     const counts = {};
@@ -237,16 +284,21 @@ function PlannerSection() {
     return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 12).map(([name]) => name);
   }, [allActivity]);
 
-  const writeSlot = async (date, idx, activity) => {
-    // optimistic local update
+  const writeSlot = async (date, idx, payload) => {
+    // payload: null to clear, or { activity, task_id }
     setBlocks(prev => {
       const filtered = prev.filter(b => !(b.block_date === date && b.slot_index === idx));
-      return activity ? [...filtered, { block_date: date, slot_index: idx, activity }] : filtered;
+      return payload
+        ? [...filtered, { block_date: date, slot_index: idx, activity: payload.activity, task_id: payload.task_id || null }]
+        : filtered;
     });
     try {
-      if (activity) {
+      if (payload) {
         const { error } = await supabase.from('planner_blocks')
-          .upsert({ block_date: date, slot_index: idx, activity }, { onConflict: 'block_date,slot_index' });
+          .upsert(
+            { block_date: date, slot_index: idx, activity: payload.activity, task_id: payload.task_id || null },
+            { onConflict: 'block_date,slot_index' }
+          );
         if (error) throw error;
       } else {
         const { error } = await supabase.from('planner_blocks').delete().eq('block_date', date).eq('slot_index', idx);
@@ -260,10 +312,68 @@ function PlannerSection() {
 
   const paintCell = (date, idx) => {
     const filled = blockMap[`${date}_${idx}`];
-    if (brush === 'ERASE') { writeSlot(date, idx, null); return; }
-    if (brush) { writeSlot(date, idx, brush); return; }
-    // No brush selected: clicking a filled cell clears it (quick single-cell undo)
-    if (filled) writeSlot(date, idx, null);
+    if (!brush) {
+      // No brush selected: clicking a filled cell clears it (quick single-cell undo)
+      if (filled) writeSlot(date, idx, null);
+      return;
+    }
+    if (brush.kind === 'erase') { writeSlot(date, idx, null); return; }
+    if (brush.kind === 'activity') { writeSlot(date, idx, { activity: brush.name, task_id: null }); return; }
+    if (brush.kind === 'task') { writeSlot(date, idx, { activity: brush.title, task_id: brush.id }); return; }
+  };
+
+  // ─── Task CRUD ─────────────────────────────────────────
+  const addCategory = async () => {
+    const title = newCategoryTitle.trim();
+    if (!title) return;
+    const position = categories.length;
+    const { data, error } = await supabase.from('task_categories').insert({ title, position }).select().single();
+    if (error) { setError(error.message); return; }
+    setCategories(prev => [...prev, data]);
+    setNewCategoryTitle('');
+  };
+
+  const deleteCategory = async (id) => {
+    if (!window.confirm('Delete this category and all its tasks?')) return;
+    const { error } = await supabase.from('task_categories').delete().eq('id', id);
+    if (error) { setError(error.message); return; }
+    setCategories(prev => prev.filter(c => c.id !== id));
+    setTasksByCategory(prev => { const n = { ...prev }; delete n[id]; return n; });
+    if (brush?.kind === 'task' && tasksByCategory[id]?.some(t => t.id === brush.id)) setBrush(null);
+  };
+
+  const addTask = async (categoryId) => {
+    const title = (newTaskTitle[categoryId] || '').trim();
+    if (!title) return;
+    const position = (tasksByCategory[categoryId] || []).length;
+    const { data, error } = await supabase.from('tasks').insert({ category_id: categoryId, title, position }).select().single();
+    if (error) { setError(error.message); return; }
+    setTasksByCategory(prev => ({ ...prev, [categoryId]: [...(prev[categoryId] || []), data] }));
+    setNewTaskTitle(prev => ({ ...prev, [categoryId]: '' }));
+  };
+
+  const toggleTask = async (task) => {
+    const is_complete = !task.is_complete;
+    setTasksByCategory(prev => ({
+      ...prev,
+      [task.category_id]: prev[task.category_id].map(t => t.id === task.id ? { ...t, is_complete } : t),
+    }));
+    const { error } = await supabase.from('tasks').update({ is_complete }).eq('id', task.id);
+    if (error) setError(error.message);
+  };
+
+  const deleteTask = async (task) => {
+    setTasksByCategory(prev => ({
+      ...prev,
+      [task.category_id]: prev[task.category_id].filter(t => t.id !== task.id),
+    }));
+    const { error } = await supabase.from('tasks').delete().eq('id', task.id);
+    if (error) setError(error.message);
+    if (brush?.kind === 'task' && brush.id === task.id) setBrush(null);
+  };
+
+  const selectTaskBrush = (task) => {
+    setBrush(prev => (prev?.kind === 'task' && prev.id === task.id) ? null : { kind: 'task', id: task.id, title: task.title });
   };
 
   const handlePointerDown = (date, idx) => {
@@ -277,7 +387,7 @@ function PlannerSection() {
   const addCustomActivity = () => {
     const name = newActivity.trim();
     if (!name) return;
-    setBrush(name);
+    setBrush({ kind: 'activity', name });
     setNewActivity('');
   };
 
@@ -292,6 +402,7 @@ function PlannerSection() {
       block_date: format(addDays(parseISO(b.block_date), 7), 'yyyy-MM-dd'),
       slot_index: b.slot_index,
       activity: b.activity,
+      task_id: b.task_id || null,
     }));
     const { error: upErr } = await supabase.from('planner_blocks').upsert(rows, { onConflict: 'block_date,slot_index' });
     if (upErr) setError(upErr.message);
@@ -328,68 +439,137 @@ function PlannerSection() {
         <button className="btn btn-sm btn-secondary" onClick={clearWeek}>Clear week</button>
       </div>
 
-      <p className="planner-hint">Pick an activity below (or type a new one), then click or drag across the grid to fill it in. Click a filled slot with no activity selected to clear it.</p>
+      <p className="planner-hint">Select a task below, or an activity chip, then click or drag across the grid to fill it in. Click a filled slot with nothing selected to clear it.</p>
 
-      <div className="planner-brushes">
-        {topActivities.filter(Boolean).map(name => (
-          <button
-            key={name}
-            className={`brush-chip ${brush === name ? 'active' : ''}`}
-            style={{ '--chip-color': activityColor(name) }}
-            onClick={() => setBrush(brush === name ? null : name)}
-          >
-            {name}
-          </button>
-        ))}
-        <button className={`brush-chip eraser ${brush === 'ERASE' ? 'active' : ''}`} onClick={() => setBrush(brush === 'ERASE' ? null : 'ERASE')}>
-          Eraser
-        </button>
-      </div>
+      <div className="planner-layout">
+        {/* ─── Task list side panel ─────────────────────── */}
+        <aside className="planner-side-panel">
+          <div className="planner-panel-header">
+            <h3>Tasks</h3>
+            <label className="planner-show-completed">
+              <input type="checkbox" checked={showCompleted} onChange={e => setShowCompleted(e.target.checked)} />
+              Show completed
+            </label>
+          </div>
 
-      <div className="planner-add-activity">
-        <input
-          type="text"
-          placeholder="Add a new activity…"
-          value={newActivity}
-          onChange={e => setNewActivity(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') addCustomActivity(); }}
-        />
-        <button className="btn btn-sm btn-secondary" disabled={!newActivity.trim()} onClick={addCustomActivity}>+ Add</button>
-      </div>
-
-      <div className="planner-grid-wrap">
-        <div className="planner-grid" style={{ gridTemplateRows: `auto repeat(${visibleSlots.length}, 28px)` }}>
-          <div className="planner-time-head" />
-          {weekDates.map((d, i) => (
-            <div key={d} className={`planner-day-head ${d === today ? 'is-today' : ''}`}>
-              <div className="dow">{DAY_LABELS[i]}</div>
-              <div className="dom">{format(parseISO(d), 'MMM d')}</div>
-            </div>
-          ))}
-
-          {visibleSlots.map(idx => (
-            <React.Fragment key={idx}>
-              <div className={`planner-time-label ${idx % 2 === 0 ? 'hour-start' : ''}`}>
-                {idx % 2 === 0 ? slotLabel(idx) : ''}
+          {categories.map(cat => {
+            const catTasks = (tasksByCategory[cat.id] || []).filter(t => showCompleted || !t.is_complete);
+            return (
+              <div className="task-category" key={cat.id}>
+                <div className="task-category-header">
+                  <span>{cat.title}</span>
+                  <button className="task-cat-delete" onClick={() => deleteCategory(cat.id)} title="Delete category">✕</button>
+                </div>
+                <ul className="task-list">
+                  {catTasks.map(t => {
+                    const mins = taskMinutesThisWeek[t.id];
+                    const selected = brush?.kind === 'task' && brush.id === t.id;
+                    return (
+                      <li key={t.id} className={`task-item ${t.is_complete ? 'complete' : ''} ${selected ? 'selected' : ''}`}>
+                        <input type="checkbox" checked={t.is_complete} onChange={() => toggleTask(t)} />
+                        <span className="task-title" onClick={() => selectTaskBrush(t)}>{t.title}</span>
+                        {mins ? <span className="task-time-badge">{formatMinutes(mins)}</span> : null}
+                        <button className="task-delete" onClick={() => deleteTask(t)}>✕</button>
+                      </li>
+                    );
+                  })}
+                </ul>
+                <div className="task-add-row">
+                  <input
+                    type="text"
+                    placeholder="Add a task…"
+                    value={newTaskTitle[cat.id] || ''}
+                    onChange={e => setNewTaskTitle(prev => ({ ...prev, [cat.id]: e.target.value }))}
+                    onKeyDown={e => { if (e.key === 'Enter') addTask(cat.id); }}
+                  />
+                  <button className="btn btn-sm btn-secondary" disabled={!(newTaskTitle[cat.id] || '').trim()} onClick={() => addTask(cat.id)}>+</button>
+                </div>
               </div>
-              {weekDates.map(d => {
-                const activity = blockMap[`${d}_${idx}`];
-                return (
-                  <div
-                    key={`${d}_${idx}`}
-                    className={`planner-cell ${activity ? '' : 'empty'} ${idx % 2 === 0 ? 'hour-start' : ''}`}
-                    style={activity ? { background: activityColor(activity) } : undefined}
-                    onMouseDown={() => handlePointerDown(d, idx)}
-                    onMouseEnter={() => handlePointerEnter(d, idx)}
-                    onTouchStart={() => handlePointerDown(d, idx)}
-                    title={activity || ''}
-                  >
-                    {activity || ''}
+            );
+          })}
+
+          <div className="task-add-category">
+            <input
+              type="text"
+              placeholder="New category…"
+              value={newCategoryTitle}
+              onChange={e => setNewCategoryTitle(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') addCategory(); }}
+            />
+            <button className="btn btn-sm btn-secondary" disabled={!newCategoryTitle.trim()} onClick={addCategory}>+ Category</button>
+          </div>
+        </aside>
+
+        {/* ─── Grid + quick activities ───────────────────── */}
+        <div className="planner-main">
+          <div className="planner-quick-label">Quick activities</div>
+          <div className="planner-brushes">
+            {topActivities.filter(Boolean).map(name => (
+              <button
+                key={name}
+                className={`brush-chip ${brush?.kind === 'activity' && brush.name === name ? 'active' : ''}`}
+                style={{ '--chip-color': activityColor(name) }}
+                onClick={() => setBrush(prev => (prev?.kind === 'activity' && prev.name === name) ? null : { kind: 'activity', name })}
+              >
+                {name}
+              </button>
+            ))}
+            <button
+              className={`brush-chip eraser ${brush?.kind === 'erase' ? 'active' : ''}`}
+              onClick={() => setBrush(prev => (prev?.kind === 'erase') ? null : { kind: 'erase' })}
+            >
+              Eraser
+            </button>
+          </div>
+
+          <div className="planner-add-activity">
+            <input
+              type="text"
+              placeholder="Add a new activity…"
+              value={newActivity}
+              onChange={e => setNewActivity(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') addCustomActivity(); }}
+            />
+            <button className="btn btn-sm btn-secondary" disabled={!newActivity.trim()} onClick={addCustomActivity}>+ Add</button>
+          </div>
+
+          <div className="planner-grid-wrap">
+            <div className="planner-grid" style={{ gridTemplateRows: `auto repeat(${visibleSlots.length}, 28px)` }}>
+              <div className="planner-time-head" />
+              {weekDates.map((d, i) => (
+                <div key={d} className={`planner-day-head ${d === today ? 'is-today' : ''}`}>
+                  <div className="dow">{DAY_LABELS[i]}</div>
+                  <div className="dom">{format(parseISO(d), 'MMM d')}</div>
+                </div>
+              ))}
+
+              {visibleSlots.map(idx => (
+                <React.Fragment key={idx}>
+                  <div className={`planner-time-label ${idx % 2 === 0 ? 'hour-start' : ''}`}>
+                    {idx % 2 === 0 ? slotLabel(idx) : ''}
                   </div>
-                );
-              })}
-            </React.Fragment>
-          ))}
+                  {weekDates.map(d => {
+                    const block = blockMap[`${d}_${idx}`];
+                    const activity = block?.activity;
+                    const isDone = block?.task_id && taskCompleteMap[block.task_id];
+                    return (
+                      <div
+                        key={`${d}_${idx}`}
+                        className={`planner-cell ${activity ? '' : 'empty'} ${idx % 2 === 0 ? 'hour-start' : ''} ${isDone ? 'is-done' : ''}`}
+                        style={activity ? { background: activityColor(activity) } : undefined}
+                        onMouseDown={() => handlePointerDown(d, idx)}
+                        onMouseEnter={() => handlePointerEnter(d, idx)}
+                        onTouchStart={() => handlePointerDown(d, idx)}
+                        title={activity || ''}
+                      >
+                        {activity || ''}
+                      </div>
+                    );
+                  })}
+                </React.Fragment>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     </div>

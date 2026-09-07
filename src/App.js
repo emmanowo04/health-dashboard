@@ -1,10 +1,10 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   LineChart, Line, AreaChart, Area, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, PieChart, Pie, Cell
 } from 'recharts';
 import { supabase } from './supabaseClient';
-import { format, subMonths, subDays, parseISO, startOfDay } from 'date-fns';
+import { format, subMonths, subDays, addDays, parseISO, startOfDay } from 'date-fns';
 import './App.css';
 
 // ─── Helpers ────────────────────────────────────────────
@@ -14,7 +14,7 @@ const today = format(new Date(), 'yyyy-MM-dd');
 const ago = (months) => format(subMonths(new Date(), months), 'yyyy-MM-dd');
 const daysAgo = (n) => format(subDays(new Date(), n), 'yyyy-MM-dd');
 
-const TABS = ['Weight', 'Measurements', 'Workouts', 'Nutrition', 'Photos'];
+const TABS = ['Planner', 'Weight', 'Measurements', 'Workouts', 'Nutrition', 'Photos'];
 const MEAL_TYPES = ['Breakfast', 'Lunch', 'Dinner', 'Snack'];
 const WORKOUT_TYPES = ['Strength', 'Cardio', 'HIIT', 'Yoga', 'Stretching', 'Other'];
 const POSE_TYPES = ['Front', 'Side', 'Back'];
@@ -31,6 +31,34 @@ const MEASUREMENT_FIELDS = [
   { key: 'thigh_right_in', label: 'R Thigh' },
   { key: 'neck_in', label: 'Neck' },
 ];
+
+// ─── Planner helpers ────────────────────────────────────
+const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const DEFAULT_PLANNER_ACTIVITIES = ['Gym', 'Padel', 'Football', 'Work', 'Church', 'Sleep', 'Commute', 'Meal Prep', 'Rest'];
+const ACTIVITY_PALETTE = ['#4f6ef7', '#f59e0b', '#ef4444', '#22c55e', '#8b5cf6', '#06b6d4', '#ec4899', '#84cc16', '#f97316', '#14b8a6', '#6366f1', '#eab308'];
+
+function activityColor(name) {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  return ACTIVITY_PALETTE[Math.abs(hash) % ACTIVITY_PALETTE.length];
+}
+
+function slotLabel(idx) {
+  const h = Math.floor(idx / 2);
+  const m = idx % 2 === 0 ? '00' : '30';
+  const period = h < 12 ? 'am' : 'pm';
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12}:${m}${period}`;
+}
+
+function mondayOf(dateStr) {
+  const d = parseISO(dateStr);
+  const day = d.getDay(); // 0 = Sun .. 6 = Sat
+  const diff = day === 0 ? -6 : 1 - day;
+  const monday = new Date(d);
+  monday.setDate(d.getDate() + diff);
+  return format(monday, 'yyyy-MM-dd');
+}
 
 // ─── Main App ───────────────────────────────────────────
 export default function App() {
@@ -83,7 +111,7 @@ export default function App() {
     }
   }, [dateFrom, dateTo]);
 
-  useEffect(() => { fetchAll(); }, [fetchAll]);
+  useEffect(() => { if (tab !== 'Planner') fetchAll(); }, [fetchAll, tab]);
 
   // ─── CRUD helpers ──────────────────────────────────────
   const insert = async (table, data) => {
@@ -116,23 +144,26 @@ export default function App() {
         ))}
       </nav>
 
-      {/* Date filter */}
-      <div className="date-filter">
-        <label>From</label>
-        <input type="date" value={dateFrom} onChange={e => { setDateFrom(e.target.value); setPreset(''); }} />
-        <label>To</label>
-        <input type="date" value={dateTo} onChange={e => { setDateTo(e.target.value); setPreset(''); }} />
-        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-          {['7d', '1m', '3m', '6m', '1y', 'all'].map(p => (
-            <button key={p} className={`preset-btn ${preset === p ? 'active' : ''}`} onClick={() => applyPreset(p)}>{p}</button>
-          ))}
+      {/* Date filter (not relevant to the forward-looking Planner) */}
+      {tab !== 'Planner' && (
+        <div className="date-filter">
+          <label>From</label>
+          <input type="date" value={dateFrom} onChange={e => { setDateFrom(e.target.value); setPreset(''); }} />
+          <label>To</label>
+          <input type="date" value={dateTo} onChange={e => { setDateTo(e.target.value); setPreset(''); }} />
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            {['7d', '1m', '3m', '6m', '1y', 'all'].map(p => (
+              <button key={p} className={`preset-btn ${preset === p ? 'active' : ''}`} onClick={() => applyPreset(p)}>{p}</button>
+            ))}
+          </div>
         </div>
-      </div>
+      )}
 
       {error && <div className="error-banner">⚠️ {error} <button className="btn btn-sm btn-secondary" style={{ marginLeft: 8 }} onClick={() => setError(null)}>Dismiss</button></div>}
-      {loading && <div className="loading">Loading data…</div>}
+      {loading && tab !== 'Planner' && <div className="loading">Loading data…</div>}
 
       {/* Tab content */}
+      {tab === 'Planner' && <PlannerSection />}
       {!loading && tab === 'Weight' && <WeightSection data={weights} onAdd={() => setModal('weight')} onDelete={(id) => remove('weight_logs', id)} />}
       {!loading && tab === 'Measurements' && <MeasurementsSection data={measurements} onAdd={() => setModal('measurement')} onDelete={(id) => remove('measurements', id)} />}
       {!loading && tab === 'Workouts' && <WorkoutsSection data={workouts} onAdd={() => setModal('workout')} onDelete={(id) => remove('workouts', id)} />}
@@ -145,6 +176,222 @@ export default function App() {
       {modal === 'workout' && <WorkoutModal onClose={() => setModal(null)} onSave={(d) => insert('workouts', d).then(ok => ok && setModal(null))} />}
       {modal === 'food' && <FoodModal onClose={() => setModal(null)} onSave={(d) => insert('food_logs', d).then(ok => ok && setModal(null))} />}
       {modal === 'photo' && <PhotoModal onClose={() => setModal(null)} onSave={(d) => insert('progress_photos', d).then(ok => ok && setModal(null))} />}
+    </div>
+  );
+}
+
+// ═════════════════════════════════════════════════════════
+// SECTION: Weekly Planner
+// ═════════════════════════════════════════════════════════
+function PlannerSection() {
+  const [weekStart, setWeekStart] = useState(mondayOf(today));
+  const [blocks, setBlocks] = useState([]); // [{block_date, slot_index, activity}]
+  const [allActivity, setAllActivity] = useState([]); // all-time activity strings, for frequency ranking
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [brush, setBrush] = useState(null); // activity name, 'ERASE', or null
+  const [newActivity, setNewActivity] = useState('');
+  const [showEarly, setShowEarly] = useState(false);
+  const draggingRef = useRef(false);
+
+  const weekDates = useMemo(() => {
+    const start = parseISO(weekStart);
+    return Array.from({ length: 7 }, (_, i) => format(addDays(start, i), 'yyyy-MM-dd'));
+  }, [weekStart]);
+
+  const fetchWeek = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    const { data, error } = await supabase.from('planner_blocks').select('*')
+      .gte('block_date', weekDates[0]).lte('block_date', weekDates[6]);
+    if (error) setError(error.message);
+    else setBlocks(data || []);
+    setLoading(false);
+  }, [weekDates]);
+
+  const fetchFrequency = useCallback(async () => {
+    const { data } = await supabase.from('planner_blocks').select('activity').limit(3000);
+    if (data) setAllActivity(data.map(d => d.activity));
+  }, []);
+
+  useEffect(() => { fetchWeek(); }, [fetchWeek]);
+  useEffect(() => { fetchFrequency(); }, [fetchFrequency]);
+
+  useEffect(() => {
+    const stop = () => { draggingRef.current = false; };
+    window.addEventListener('mouseup', stop);
+    window.addEventListener('touchend', stop);
+    return () => { window.removeEventListener('mouseup', stop); window.removeEventListener('touchend', stop); };
+  }, []);
+
+  const blockMap = useMemo(() => {
+    const m = {};
+    blocks.forEach(b => { m[`${b.block_date}_${b.slot_index}`] = b.activity; });
+    return m;
+  }, [blocks]);
+
+  const topActivities = useMemo(() => {
+    const counts = {};
+    allActivity.forEach(a => { counts[a] = (counts[a] || 0) + 1; });
+    DEFAULT_PLANNER_ACTIVITIES.forEach(a => { if (!(a in counts)) counts[a] = 0; });
+    return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 12).map(([name]) => name);
+  }, [allActivity]);
+
+  const writeSlot = async (date, idx, activity) => {
+    // optimistic local update
+    setBlocks(prev => {
+      const filtered = prev.filter(b => !(b.block_date === date && b.slot_index === idx));
+      return activity ? [...filtered, { block_date: date, slot_index: idx, activity }] : filtered;
+    });
+    try {
+      if (activity) {
+        const { error } = await supabase.from('planner_blocks')
+          .upsert({ block_date: date, slot_index: idx, activity }, { onConflict: 'block_date,slot_index' });
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from('planner_blocks').delete().eq('block_date', date).eq('slot_index', idx);
+        if (error) throw error;
+      }
+    } catch (e) {
+      setError(e.message);
+      fetchWeek();
+    }
+  };
+
+  const paintCell = (date, idx) => {
+    const filled = blockMap[`${date}_${idx}`];
+    if (brush === 'ERASE') { writeSlot(date, idx, null); return; }
+    if (brush) { writeSlot(date, idx, brush); return; }
+    // No brush selected: clicking a filled cell clears it (quick single-cell undo)
+    if (filled) writeSlot(date, idx, null);
+  };
+
+  const handlePointerDown = (date, idx) => {
+    draggingRef.current = true;
+    paintCell(date, idx);
+  };
+  const handlePointerEnter = (date, idx) => {
+    if (draggingRef.current) paintCell(date, idx);
+  };
+
+  const addCustomActivity = () => {
+    const name = newActivity.trim();
+    if (!name) return;
+    setBrush(name);
+    setNewActivity('');
+  };
+
+  const copyLastWeek = async () => {
+    const prevStart = format(addDays(parseISO(weekStart), -7), 'yyyy-MM-dd');
+    const prevEnd = format(addDays(parseISO(weekStart), -1), 'yyyy-MM-dd');
+    const { data, error } = await supabase.from('planner_blocks').select('*')
+      .gte('block_date', prevStart).lte('block_date', prevEnd);
+    if (error) { setError(error.message); return; }
+    if (!data || !data.length) { alert('No entries found in the previous week.'); return; }
+    const rows = data.map(b => ({
+      block_date: format(addDays(parseISO(b.block_date), 7), 'yyyy-MM-dd'),
+      slot_index: b.slot_index,
+      activity: b.activity,
+    }));
+    const { error: upErr } = await supabase.from('planner_blocks').upsert(rows, { onConflict: 'block_date,slot_index' });
+    if (upErr) setError(upErr.message);
+    else fetchWeek();
+  };
+
+  const clearWeek = async () => {
+    if (!window.confirm('Clear every planned slot this week?')) return;
+    const { error } = await supabase.from('planner_blocks').delete()
+      .gte('block_date', weekDates[0]).lte('block_date', weekDates[6]);
+    if (error) setError(error.message);
+    else fetchWeek();
+  };
+
+  const visibleSlots = useMemo(() => {
+    const start = showEarly ? 0 : 12; // 12 = 6:00am
+    return Array.from({ length: 48 - start }, (_, i) => start + i);
+  }, [showEarly]);
+
+  return (
+    <div className="card">
+      <div className="card-header">
+        <h2>Weekly Planner</h2>
+        {loading && <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Syncing…</span>}
+      </div>
+
+      <div className="planner-week-nav">
+        <button className="nav-btn" onClick={() => setWeekStart(format(addDays(parseISO(weekStart), -7), 'yyyy-MM-dd'))}>‹</button>
+        <span className="planner-week-label">{format(parseISO(weekStart), 'MMM d')} – {format(addDays(parseISO(weekStart), 6), 'MMM d, yyyy')}</span>
+        <button className="nav-btn" onClick={() => setWeekStart(format(addDays(parseISO(weekStart), 7), 'yyyy-MM-dd'))}>›</button>
+        <button className="btn btn-sm btn-secondary" onClick={() => setWeekStart(mondayOf(today))}>This week</button>
+        <button className="btn btn-sm btn-secondary" onClick={copyLastWeek}>Copy last week</button>
+        <button className="btn btn-sm btn-secondary" onClick={() => setShowEarly(s => !s)}>{showEarly ? 'Hide' : 'Show'} 12–6am</button>
+        <button className="btn btn-sm btn-secondary" onClick={clearWeek}>Clear week</button>
+      </div>
+
+      <p className="planner-hint">Pick an activity below (or type a new one), then click or drag across the grid to fill it in. Click a filled slot with no activity selected to clear it.</p>
+
+      <div className="planner-brushes">
+        {topActivities.filter(Boolean).map(name => (
+          <button
+            key={name}
+            className={`brush-chip ${brush === name ? 'active' : ''}`}
+            style={{ '--chip-color': activityColor(name) }}
+            onClick={() => setBrush(brush === name ? null : name)}
+          >
+            {name}
+          </button>
+        ))}
+        <button className={`brush-chip eraser ${brush === 'ERASE' ? 'active' : ''}`} onClick={() => setBrush(brush === 'ERASE' ? null : 'ERASE')}>
+          Eraser
+        </button>
+      </div>
+
+      <div className="planner-add-activity">
+        <input
+          type="text"
+          placeholder="Add a new activity…"
+          value={newActivity}
+          onChange={e => setNewActivity(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') addCustomActivity(); }}
+        />
+        <button className="btn btn-sm btn-secondary" disabled={!newActivity.trim()} onClick={addCustomActivity}>+ Add</button>
+      </div>
+
+      <div className="planner-grid-wrap">
+        <div className="planner-grid" style={{ gridTemplateRows: `auto repeat(${visibleSlots.length}, 28px)` }}>
+          <div className="planner-time-head" />
+          {weekDates.map((d, i) => (
+            <div key={d} className={`planner-day-head ${d === today ? 'is-today' : ''}`}>
+              <div className="dow">{DAY_LABELS[i]}</div>
+              <div className="dom">{format(parseISO(d), 'MMM d')}</div>
+            </div>
+          ))}
+
+          {visibleSlots.map(idx => (
+            <React.Fragment key={idx}>
+              <div className={`planner-time-label ${idx % 2 === 0 ? 'hour-start' : ''}`}>
+                {idx % 2 === 0 ? slotLabel(idx) : ''}
+              </div>
+              {weekDates.map(d => {
+                const activity = blockMap[`${d}_${idx}`];
+                return (
+                  <div
+                    key={`${d}_${idx}`}
+                    className={`planner-cell ${activity ? '' : 'empty'} ${idx % 2 === 0 ? 'hour-start' : ''}`}
+                    style={activity ? { background: activityColor(activity) } : undefined}
+                    onMouseDown={() => handlePointerDown(d, idx)}
+                    onMouseEnter={() => handlePointerEnter(d, idx)}
+                    onTouchStart={() => handlePointerDown(d, idx)}
+                    title={activity || ''}
+                  >
+                    {activity || ''}
+                  </div>
+                );
+              })}
+            </React.Fragment>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
